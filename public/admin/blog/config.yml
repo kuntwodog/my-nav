@@ -11,9 +11,9 @@ backend:
 
 site_url: https://blog.htwok.cn
 display_url: https://blog.htwok.cn
-logo_url: https://blog.htwok.cn/img/avatar.webp
+logo:
+  src: https://blog.htwok.cn/img/avatar.webp
 
-locale: zh_Hans
 
 # 图片统一上传到 public/img/uploads，站点内以 /img/uploads/ 访问
 media_folder: public/img/uploads

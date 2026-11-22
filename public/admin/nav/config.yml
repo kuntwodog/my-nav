@@ -11,9 +11,9 @@ backend:
 
 site_url: https://htwok.cn
 display_url: https://htwok.cn
-logo_url: https://htwok.cn/menav.svg
+logo:
+  src: https://htwok.cn/menav.svg
 
-locale: zh_Hans
 
 media_folder: public/uploads
 public_folder: /uploads
