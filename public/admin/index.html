@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="dark light" />
+    <title>内容管理</title>
+    <style>
+      :root {
+        --bg: #0e0f11;
+        --panel: #16181c;
+        --panel-hover: #1d2026;
+        --border: #262a32;
+        --text: #e8eaed;
+        --muted: #8b93a1;
+        --accent: #6a89c9;
+        --accent-soft: rgba(106, 137, 201, 0.14);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f5f6f8;
+          --panel: #ffffff;
+          --panel-hover: #f0f2f6;
+          --border: #e2e5ea;
+          --text: #1a1d22;
+          --muted: #666e7d;
+          --accent: #3f6099;
+          --accent-soft: rgba(63, 96, 153, 0.1);
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 20px;
+      }
+      .wrap { width: 100%; max-width: 720px; }
+      .head { margin-bottom: 28px; }
+      .head h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .head p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+      .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+      @media (min-width: 620px) { .grid { grid-template-columns: 1fr 1fr; } }
+      a.card {
+        display: block;
+        padding: 22px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: inherit;
+        text-decoration: none;
+        transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+      }
+      a.card:hover {
+        background: var(--panel-hover);
+        border-color: var(--accent);
+        transform: translateY(-2px);
+      }
+      .icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 14px;
+      }
+      .icon svg { width: 20px; height: 20px; }
+      .card h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+      .card p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.6; }
+      .meta {
+        margin-top: 12px;
+        font-size: 12px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .foot {
+        margin-top: 26px;
+        padding: 16px 18px;
+        border-radius: 12px;
+        border: 1px dashed var(--border);
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+      .foot strong { color: var(--text); font-weight: 600; }
+      .foot code {
+        background: var(--accent-soft);
+        color: var(--accent);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="head">
+        <h1>内容管理</h1>
+        <p>选择要管理的站点。首次使用需要用 GitHub Token 登录，登录一次后两个站点通用。</p>
+      </div>
+
+      <div class="grid">
+        <a class="card" href="./blog/">
+          <div class="icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            </svg>
+          </div>
+          <h2>博客内容</h2>
+          <p>写文章、改正文、上传封面和配图，以及调整站点名称、作者、社交链接等配置。</p>
+          <div class="meta">blog.htwok.cn</div>
+        </a>
+
+        <a class="card" href="./nav/">
+          <div class="icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="1.5" />
+              <rect x="14" y="3" width="7" height="7" rx="1.5" />
+              <rect x="3" y="14" width="7" height="7" rx="1.5" />
+              <rect x="14" y="14" width="7" height="7" rx="1.5" />
+            </svg>
+          </div>
+          <h2>导航页内容</h2>
+          <p>增删导航链接、调整分组和排序、更换图标，以及修改导航站的标题与设置。</p>
+          <div class="meta">htwok.cn</div>
+        </a>
+      </div>
+
+      <div class="foot">
+        <strong>首次登录：</strong>进入任一后台后点 <code>Sign In with Token</code>，按提示跳转到 GitHub
+        生成一个 Token（勾选 <code>Contents: Read and write</code>），粘贴回来即可。Token
+        只保存在你自己的浏览器里，不会上传到服务器。
+      </div>
+    </div>
+  </body>
+</html>

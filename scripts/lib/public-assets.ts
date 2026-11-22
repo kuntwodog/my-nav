@@ -1,0 +1,274 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { collectSitesRecursively } from '../../src/lib/site-data/sites.ts';
+import {
+  isSnapshotAssetPath,
+  isSnapshotAssetData,
+  resolveSnapshotAssetReference,
+} from '../../src/shared/snapshot-assets.ts';
+
+type PublicAssetsLogger = {
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+};
+
+type SiteLike = {
+  favicon?: string;
+  logo?: string;
+};
+
+type SiteItemLike = {
+  faviconUrl?: unknown;
+};
+
+type PageConfigLike = {
+  sites?: SiteItemLike[];
+  categories?: unknown[];
+};
+
+type NavigationItemLike = {
+  id?: unknown;
+};
+
+type ConfigLike = {
+  site?: SiteLike;
+  navigation?: NavigationItemLike[];
+  pages?: Record<string, PageConfigLike | unknown>;
+  snapshot?: { assets: Record<string, string> };
+  [key: string]: unknown;
+};
+
+type EsbuildLike = {
+  buildSync: (options: Record<string, unknown>) => void;
+  transformSync: (
+    source: string,
+    options: Record<string, unknown>
+  ) => {
+    code: string;
+  };
+};
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getErrorStack(error: unknown): string | undefined {
+  return error instanceof Error ? error.stack : undefined;
+}
+
+function isPageConfig(value: unknown): value is PageConfigLike {
+  return Boolean(value && typeof value === 'object');
+}
+
+function loadEsbuild(): EsbuildLike | null {
+  try {
+    return require('esbuild') as EsbuildLike;
+  } catch {
+    return null;
+  }
+}
+
+function ensureDir(dirPath: string): void {
+  if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function copyFile(srcPath: string, destPath: string): void {
+  ensureDir(path.dirname(destPath));
+  fs.copyFileSync(srcPath, destPath);
+}
+
+function copyDirRecursive(src: string, dest: string): void {
+  if (!fs.existsSync(src)) return;
+  ensureDir(dest);
+
+  fs.readdirSync(src, { withFileTypes: true }).forEach((entry) => {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+      return;
+    }
+    copyFile(srcPath, destPath);
+  });
+}
+
+function tryBundleCss(
+  srcPath: string,
+  destPath: string,
+  log: PublicAssetsLogger,
+  verbose = false
+): boolean {
+  const esbuild = loadEsbuild();
+  if (!esbuild) {
+    return false;
+  }
+
+  try {
+    esbuild.buildSync({
+      entryPoints: [path.resolve(srcPath)],
+      outfile: path.resolve(destPath),
+      bundle: true,
+      minify: true,
+      logLevel: 'silent',
+    });
+    return true;
+  } catch (error) {
+    log.warn('CSS bundle 失败，降级为复制', {
+      message: getErrorMessage(error),
+    });
+    const stack = getErrorStack(error);
+    if (verbose && stack) console.error(stack);
+    return false;
+  }
+}
+
+function prepareCssAssets(log: PublicAssetsLogger, verbose = false): void {
+  if (!tryBundleCss('assets/style.css', 'public/assets/style.css', log, verbose)) {
+    copyFile('assets/style.css', 'public/assets/style.css');
+    copyDirRecursive('assets/styles', 'public/assets/styles');
+  }
+}
+
+function writeMinifiedStaticScript(
+  source: string,
+  destPath: string,
+  log: PublicAssetsLogger,
+  verbose = false
+): boolean {
+  const esbuild = loadEsbuild();
+  if (!esbuild) {
+    return false;
+  }
+
+  try {
+    const result = esbuild.transformSync(source, {
+      loader: 'js',
+      minify: true,
+      charset: 'utf8',
+    });
+    ensureDir(path.dirname(destPath));
+    fs.writeFileSync(destPath, result.code);
+    return true;
+  } catch (error) {
+    log.warn('压缩静态脚本失败，已降级为原始脚本', {
+      path: destPath,
+      message: getErrorMessage(error),
+    });
+    const stack = getErrorStack(error);
+    if (verbose && stack) console.error(stack);
+    return false;
+  }
+}
+
+function preparePinyinMatchScript(log: PublicAssetsLogger, verbose = false): void {
+  const { pinyinMatchScript } = require('../../assets/pinyin-match.ts') as {
+    pinyinMatchScript: string;
+  };
+
+  if (!writeMinifiedStaticScript(pinyinMatchScript, 'public/pinyin-match.js', log, verbose)) {
+    ensureDir(path.dirname('public/pinyin-match.js'));
+    fs.writeFileSync('public/pinyin-match.js', pinyinMatchScript);
+  }
+}
+
+function copyLocalFaviconUrls(config: ConfigLike, log: PublicAssetsLogger): void {
+  const copied = new Set();
+
+  const copyLocalAsset = (rawUrl: unknown): void => {
+    const raw = String(rawUrl || '').trim();
+    if (!raw || /^https?:\/\//i.test(raw)) return;
+
+    const rel = raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '');
+    if (!rel.startsWith('assets/')) return;
+
+    const normalized = path.posix.normalize(rel);
+    if (!normalized.startsWith('assets/') || copied.has(normalized)) return;
+    copied.add(normalized);
+
+    const srcPath = path.join(process.cwd(), normalized);
+    const destPath = path.join(process.cwd(), 'public', normalized);
+    if (!fs.existsSync(srcPath)) {
+      log.warn('faviconUrl 本地文件不存在', { path: normalized });
+      return;
+    }
+
+    copyFile(srcPath, destPath);
+  };
+
+  if (!config || !Array.isArray(config.navigation)) return;
+
+  config.navigation.forEach((navItem) => {
+    const pageId = navItem && navItem.id ? String(navItem.id) : '';
+    if (!pageId) return;
+    const pageConfig = config.pages && config.pages[pageId] ? config.pages[pageId] : config[pageId];
+    if (!isPageConfig(pageConfig)) return;
+
+    if (Array.isArray(pageConfig.sites)) {
+      pageConfig.sites.forEach((site) => site && copyLocalAsset(site.faviconUrl));
+    }
+
+    if (Array.isArray(pageConfig.categories)) {
+      const sites: SiteItemLike[] = [];
+      pageConfig.categories.forEach((category) => collectSitesRecursively(category, sites));
+      sites.forEach((site) => site && copyLocalAsset(site.faviconUrl));
+    }
+  });
+}
+
+function copySiteImage(raw: unknown, label: string, log: PublicAssetsLogger): void {
+  const value = String(raw || '').trim();
+  if (!value || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) return;
+
+  const reference = resolveSnapshotAssetReference(value);
+  if (!reference) {
+    log.warn(`${label} 路径不受支持，需位于 assets/ 或为根目录文件名`, { path: value });
+    return;
+  }
+  if (!fs.existsSync(reference.source)) {
+    log.warn(`${label} 本地文件不存在`, { path: reference.source });
+    return;
+  }
+
+  // 保留配置中的相对路径，页面里的 ./<path> 才能与复制结果对上。
+  copyFile(reference.source, path.join('public', reference.destination));
+}
+
+function copySiteImages(config: ConfigLike, log: PublicAssetsLogger): void {
+  const site = config && config.site ? config.site : {};
+  copySiteImage(site.favicon, 'favicon', log);
+  copySiteImage(site.logo, 'logo', log);
+}
+
+function prepareIconAssets(config: ConfigLike, log: PublicAssetsLogger): void {
+  if (config.snapshot) {
+    for (const [relative, data] of Object.entries(config.snapshot.assets)) {
+      if (!isSnapshotAssetPath(relative)) {
+        throw new Error('快照图片路径无效：' + relative);
+      }
+      if (!isSnapshotAssetData(data)) throw new Error('快照图片数据无效');
+    }
+    // 先落清单，写入中断后下次构建也能清理已生成的图片。
+    fs.writeFileSync(
+      path.resolve('public', '.menav-snapshot-assets.json'),
+      JSON.stringify(Object.keys(config.snapshot.assets))
+    );
+    for (const [relative, data] of Object.entries(config.snapshot.assets)) {
+      const destination = path.resolve('public', relative);
+      ensureDir(path.dirname(destination));
+      fs.writeFileSync(destination, Buffer.from(data, 'base64'));
+    }
+    return;
+  }
+  copyLocalFaviconUrls(config, log);
+  copySiteImages(config, log);
+}
+
+export {
+  ensureDir,
+  getErrorMessage,
+  getErrorStack,
+  prepareCssAssets,
+  prepareIconAssets,
+  preparePinyinMatchScript,
+};
+export type { ConfigLike, PublicAssetsLogger };

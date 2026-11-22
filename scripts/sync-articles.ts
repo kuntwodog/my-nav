@@ -1,0 +1,1122 @@
+/* eslint-disable no-console */
+const fs = require('node:fs') as typeof import('node:fs');
+const path = require('node:path') as typeof import('node:path');
+const dns = require('node:dns').promises as typeof import('node:dns').promises;
+const net = require('node:net') as typeof import('node:net');
+const Parser = require('rss-parser') as new (options?: Record<string, unknown>) => RssParserLike;
+
+import { loadConfig } from '../src/lib/config/index.ts';
+import { createLogger, isVerbose, startTimer } from '../src/lib/logging/logger.ts';
+import { decodeHtmlEntities, htmlToText } from '../src/lib/security/html.ts';
+import { collectSitesRecursively, normalizeUrlKey } from '../src/lib/site-data/sites.ts';
+
+const log = createLogger('sync:articles');
+
+type ConfigLike = {
+  site?: {
+    rss?: Partial<RssSettings>;
+  };
+  navigation?: Array<{ id?: unknown }>;
+  pages?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+type RssSettings = {
+  enabled: boolean;
+  cacheDir: string;
+  fetch: {
+    timeoutMs: number;
+    maxRetries: number;
+    concurrency: number;
+    totalTimeoutMs: number;
+    maxRedirects: number;
+    userAgent: string;
+    htmlMaxBytes: number;
+    feedMaxBytes: number;
+  };
+  articles: {
+    perSite: number;
+    total: number;
+    summaryMaxLength: number;
+  };
+};
+
+type SiteLike = {
+  name?: unknown;
+  url?: unknown;
+  icon?: unknown;
+};
+
+type PageConfigLike = {
+  title?: unknown;
+  template?: unknown;
+  sites?: SiteLike[];
+  categories?: unknown[];
+};
+
+type Article = {
+  title: string;
+  url: string;
+  summary: string;
+  publishedAt: string;
+  source: string;
+  sourceUrl: string;
+  icon: string;
+};
+
+type FeedItem = {
+  title?: unknown;
+  link?: unknown;
+  contentSnippet?: unknown;
+  summary?: unknown;
+  content?: unknown;
+  isoDate?: unknown;
+  pubDate?: unknown;
+};
+
+type RssParserLike = {
+  parseString: (text: string) => Promise<{ title?: string; items?: FeedItem[] }>;
+};
+
+type FetchWithRedirectsResult = {
+  url: string;
+  response: Response;
+  text: string;
+};
+
+type FetchWithRedirectsOptions = {
+  timeoutMs: number;
+  maxRedirects: number;
+  headers: Record<string, string>;
+  maxBytes: number;
+};
+
+type FeedParseResult = {
+  feedUrl: string;
+  feedTitle: string;
+  items: FeedItem[];
+};
+
+type SourceSiteResult = {
+  site: {
+    name: string;
+    url: string;
+    feedUrl: string;
+    status: 'success' | 'failed' | 'skipped';
+    error: string;
+    fetchedAt: string;
+    durationMs?: number;
+  };
+  articles: Article[];
+};
+
+type PageSelection = {
+  pageId: string;
+  pageConfig: PageConfigLike;
+};
+
+type SyncSourceReport = {
+  name: string;
+  url?: string;
+  status: 'success' | 'failed' | 'skipped';
+  error?: string;
+  fallback?: boolean;
+};
+
+type SyncReport = {
+  script: string;
+  success: number;
+  failed: number;
+  skipped: number;
+  cacheWritten: boolean;
+  sources: SyncSourceReport[];
+};
+
+type FeedCachePayload = {
+  articles?: unknown[];
+};
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function appendSyncReport(report: SyncReport): void {
+  const reportPath = process.env.MENAV_SYNC_REPORT;
+  if (!reportPath) return;
+  try {
+    fs.appendFileSync(reportPath, `${JSON.stringify(report)}\n`, 'utf8');
+  } catch {
+    // 报告写入失败不应影响同步结果
+  }
+}
+
+// 全部来源失败时不覆盖旧缓存；无来源时允许写入空缓存以反映配置删除。
+function shouldWriteSourceCache(totalSources: number, successSources: number): boolean {
+  return totalSources === 0 || successSources > 0;
+}
+
+function writeSourceCacheIfUsable(
+  cachePath: string,
+  payload: unknown,
+  totalSources: number,
+  successSources: number
+): boolean {
+  if (!shouldWriteSourceCache(totalSources, successSources)) return false;
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify(payload, null, 2));
+  return true;
+}
+
+function getErrorStack(error: unknown): string | undefined {
+  return error instanceof Error ? error.stack : undefined;
+}
+
+const DEFAULT_RSS_SETTINGS = {
+  enabled: true,
+  cacheDir: 'dev',
+  fetch: {
+    timeoutMs: 10_000,
+    maxRetries: 1,
+    concurrency: 5,
+    totalTimeoutMs: 60_000,
+    maxRedirects: 3,
+    userAgent: 'MeNavRSSSync/1.0',
+    htmlMaxBytes: 512 * 1024,
+    feedMaxBytes: 1024 * 1024,
+  },
+  articles: {
+    perSite: 8,
+    total: 50,
+    summaryMaxLength: 200,
+  },
+};
+
+function parseBooleanEnv(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === '') return fallback;
+  const v = String(value).trim().toLowerCase();
+  if (v === '1' || v === 'true' || v === 'yes' || v === 'y') return true;
+  if (v === '0' || v === 'false' || v === 'no' || v === 'n') return false;
+  return fallback;
+}
+
+function parseIntegerEnv(value: unknown, fallback: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number.parseInt(String(value), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function getRssSettings(config: ConfigLike): RssSettings {
+  const fromConfig =
+    config && config.site && config.site.rss && typeof config.site.rss === 'object'
+      ? config.site.rss
+      : {};
+
+  const merged = {
+    ...DEFAULT_RSS_SETTINGS,
+    ...fromConfig,
+    fetch: {
+      ...DEFAULT_RSS_SETTINGS.fetch,
+      ...(fromConfig.fetch || {}),
+    },
+    articles: {
+      ...DEFAULT_RSS_SETTINGS.articles,
+      ...(fromConfig.articles || {}),
+    },
+  };
+
+  // 环境变量覆盖（主要给 CI 调试/降级用）
+  merged.enabled = parseBooleanEnv(process.env.RSS_ENABLED, merged.enabled);
+  merged.cacheDir = process.env.RSS_CACHE_DIR ? String(process.env.RSS_CACHE_DIR) : merged.cacheDir;
+
+  merged.fetch.timeoutMs = parseIntegerEnv(process.env.RSS_FETCH_TIMEOUT, merged.fetch.timeoutMs);
+  merged.fetch.maxRetries = parseIntegerEnv(
+    process.env.RSS_FETCH_MAX_RETRIES,
+    merged.fetch.maxRetries
+  );
+  merged.fetch.concurrency = parseIntegerEnv(
+    process.env.RSS_FETCH_CONCURRENCY,
+    merged.fetch.concurrency
+  );
+  merged.fetch.totalTimeoutMs = parseIntegerEnv(
+    process.env.RSS_TOTAL_TIMEOUT,
+    merged.fetch.totalTimeoutMs
+  );
+  merged.fetch.maxRedirects = parseIntegerEnv(
+    process.env.RSS_FETCH_MAX_REDIRECTS,
+    merged.fetch.maxRedirects
+  );
+
+  merged.articles.perSite = parseIntegerEnv(
+    process.env.RSS_ARTICLES_PER_SITE,
+    merged.articles.perSite
+  );
+  merged.articles.total = parseIntegerEnv(process.env.RSS_ARTICLES_TOTAL, merged.articles.total);
+  merged.articles.summaryMaxLength = parseIntegerEnv(
+    process.env.RSS_SUMMARY_MAX_LENGTH,
+    merged.articles.summaryMaxLength
+  );
+
+  // 兜底约束：避免奇怪配置导致卡死/爆内存
+  merged.fetch.timeoutMs = Math.max(1_000, merged.fetch.timeoutMs);
+  merged.fetch.totalTimeoutMs = Math.max(5_000, merged.fetch.totalTimeoutMs);
+  merged.fetch.concurrency = Math.max(1, Math.min(20, merged.fetch.concurrency));
+  merged.fetch.maxRetries = Math.max(0, Math.min(3, merged.fetch.maxRetries));
+  merged.fetch.maxRedirects = Math.max(0, Math.min(10, merged.fetch.maxRedirects));
+
+  merged.articles.perSite = Math.max(1, Math.min(50, merged.articles.perSite));
+  merged.articles.total = Math.max(1, Math.min(500, merged.articles.total));
+  merged.articles.summaryMaxLength = Math.max(0, Math.min(2_000, merged.articles.summaryMaxLength));
+
+  return merged;
+}
+
+function isHttpUrl(url: unknown): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(String(url));
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// 两张表分开：IPv4-mapped 网段会命中 BlockList 的 IPv4 检查，混用会误伤全部公网 IPv4。
+const PRIVATE_IPV4_BLOCKS = new net.BlockList();
+(
+  [
+    ['0.0.0.0', 8],
+    ['10.0.0.0', 8],
+    ['100.64.0.0', 10],
+    ['127.0.0.0', 8],
+    ['169.254.0.0', 16],
+    ['172.16.0.0', 12],
+    ['192.0.0.0', 24],
+    ['192.0.2.0', 24],
+    ['192.168.0.0', 16],
+    ['198.18.0.0', 15],
+    ['198.51.100.0', 24],
+    ['203.0.113.0', 24],
+    ['224.0.0.0', 4],
+    ['240.0.0.0', 4],
+  ] as const
+).forEach(([address, prefix]) => PRIVATE_IPV4_BLOCKS.addSubnet(address, prefix, 'ipv4'));
+
+const PRIVATE_IPV6_BLOCKS = new net.BlockList();
+(
+  [
+    ['::', 128],
+    ['::1', 128],
+    ['::ffff:0:0', 96],
+    ['fe80::', 10],
+    ['fc00::', 7],
+    ['ff00::', 8],
+  ] as const
+).forEach(([address, prefix]) => PRIVATE_IPV6_BLOCKS.addSubnet(address, prefix, 'ipv6'));
+
+// URL.hostname 对 IPv6 保留方括号，net 模块只接受裸地址。
+function normalizeIpLiteral(hostname: unknown): string {
+  const text = String(hostname || '')
+    .trim()
+    .toLowerCase();
+  const unwrapped = text.startsWith('[') && text.endsWith(']') ? text.slice(1, -1) : text;
+  return unwrapped.split('%')[0];
+}
+
+function isPrivateIp(ip: unknown): boolean {
+  if (!ip) return true;
+  const ipText = normalizeIpLiteral(ip);
+  const family = net.isIP(ipText);
+  if (family === 4) return PRIVATE_IPV4_BLOCKS.check(ipText, 'ipv4');
+  if (family === 6) return PRIVATE_IPV6_BLOCKS.check(ipText, 'ipv6');
+  return true;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} 超时（${timeoutMs}ms）`)), timeoutMs);
+    });
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function assertSafeToFetch(url: string, timeoutMs: number): Promise<void> {
+  const u = new URL(String(url));
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`仅允许 http/https：${u.protocol}`);
+  }
+
+  if (u.username || u.password) {
+    throw new Error('禁止包含用户名/密码的 URL');
+  }
+
+  const hostname = normalizeIpLiteral(u.hostname);
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    throw new Error('禁止访问本机地址');
+  }
+  if (hostname.endsWith('.local')) {
+    throw new Error('禁止访问 .local 域名');
+  }
+
+  if (net.isIP(hostname)) {
+    if (isPrivateIp(hostname)) throw new Error('禁止访问内网/保留 IP');
+    return;
+  }
+
+  // 解析域名，阻断解析到内网的情况（best-effort）
+  const records = await withTimeout(
+    dns.lookup(hostname, { all: true, verbatim: true }),
+    Math.min(2_000, timeoutMs),
+    `DNS 解析 ${hostname}`
+  );
+
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error('DNS 解析失败或无结果');
+  }
+
+  const hasPrivate = records.some((r) => isPrivateIp(r.address));
+  if (hasPrivate) throw new Error('DNS 解析到内网/保留地址，已阻断');
+}
+
+function buildHeaders(userAgent: string): Record<string, string> {
+  return {
+    'user-agent': userAgent,
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  };
+}
+
+async function fetchWithRedirects(
+  url: string,
+  { timeoutMs, maxRedirects, headers, maxBytes }: FetchWithRedirectsOptions
+): Promise<FetchWithRedirectsResult> {
+  let current = String(url);
+  for (let i = 0; i <= maxRedirects; i += 1) {
+    await assertSafeToFetch(current, timeoutMs);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(current, {
+        method: 'GET',
+        redirect: 'manual',
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const status = response.status;
+    if (status >= 300 && status < 400) {
+      const location = response.headers.get('location');
+      if (!location) throw new Error(`重定向缺少 Location（${status}）`);
+      current = new URL(location, current).toString();
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${status}`);
+    }
+
+    const text = await readResponseTextWithLimit(response, maxBytes);
+    return { url: current, response, text };
+  }
+
+  throw new Error(`重定向次数超过上限（${maxRedirects}）`);
+}
+
+async function readResponseTextWithLimit(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+      throw new Error('响应体过大');
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let received = 0;
+  let text = '';
+
+  while (true) {
+    // eslint-disable-next-line no-await-in-loop
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      try {
+        reader.cancel();
+      } catch {
+        // ignore
+      }
+      throw new Error('响应体过大');
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return text;
+}
+
+function readHtmlAttribute(tag: string, name: string): string {
+  // 无引号值放宽到含 =，否则带 query 的 href 会被截断；值仍在空白或 > 处结束。
+  const pattern = new RegExp(
+    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'<>\`]+))`,
+    'i'
+  );
+  const match = pattern.exec(tag);
+  if (!match) return '';
+  return match[1] ?? match[2] ?? match[3] ?? '';
+}
+
+function extractFeedLinksFromHtml(html: unknown, baseUrl: string): string[] {
+  const candidates: string[] = [];
+  if (!html) return candidates;
+
+  const linkTags = String(html).match(/<link\b[^>]*>/gi) || [];
+  for (const tag of linkTags) {
+    const rel = readHtmlAttribute(tag, 'rel');
+    if (!/alternate/i.test(rel)) continue;
+
+    const type = readHtmlAttribute(tag, 'type');
+    const isFeedType = /application\/(rss|atom)\+xml/i.test(type) || /(rss|atom)/i.test(type);
+    if (!isFeedType) continue;
+
+    // 属性值可能含 &amp; 等实体，先解码再交给 URL 解析。
+    const href = decodeHtmlEntities(readHtmlAttribute(tag, 'href')).trim();
+    if (!href) continue;
+
+    try {
+      const resolved = new URL(href, baseUrl).toString();
+      if (isHttpUrl(resolved)) candidates.push(resolved);
+    } catch {
+      // ignore bad url
+    }
+  }
+
+  // 简单排序：优先 RSS，其次 Atom
+  const rank = (url: string): number => (url.includes('atom') ? 2 : 1);
+  return [...new Set(candidates)].sort((a, b) => rank(a) - rank(b));
+}
+
+function buildCommonFeedUrls(siteUrl: string): string[] {
+  // 相对站点路径查找，兼容博客放在子目录的站点（例如 /blog/atom.xml）。
+  const base = siteUrl.endsWith('/') ? siteUrl : siteUrl + '/';
+  const common = ['feed.xml', 'index.xml', 'atom.xml', 'rss.xml', 'feed', 'rss', 'atom'];
+  const out: string[] = [];
+  for (const p of common) {
+    try {
+      const u = new URL(p, base).toString();
+      if (!out.includes(u)) out.push(u);
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
+
+async function tryFeedCandidate(
+  candidateUrl: string,
+  settings: RssSettings,
+  deadlineTs: number
+): Promise<string | null> {
+  const timeRemaining = deadlineTs - Date.now();
+  if (timeRemaining <= 0) throw new Error('总超时：无法继续发现 RSS');
+  try {
+    const candidate = await fetchWithRedirects(candidateUrl, {
+      timeoutMs: Math.min(settings.fetch.timeoutMs, timeRemaining),
+      maxRedirects: settings.fetch.maxRedirects,
+      headers: buildHeaders(settings.fetch.userAgent),
+      maxBytes: settings.fetch.feedMaxBytes,
+    });
+    const contentType = candidate.response.headers.get('content-type') || '';
+    const body = candidate.text.trim();
+    if (/rss|atom|xml/i.test(contentType) || /^<\?xml\b|<rss\b|<feed\b/i.test(body)) {
+      return candidate.url;
+    }
+  } catch (error) {
+    if (Date.now() >= deadlineTs) throw error;
+  }
+  return null;
+}
+
+async function discoverFeedUrl(
+  siteUrl: string,
+  settings: RssSettings,
+  deadlineTs: number
+): Promise<string | null> {
+  const timeRemaining = deadlineTs - Date.now();
+  if (timeRemaining <= 0) throw new Error('总超时：无法继续发现 RSS');
+
+  let homepage: Awaited<ReturnType<typeof fetchWithRedirects>> | null = null;
+  try {
+    homepage = await fetchWithRedirects(siteUrl, {
+      timeoutMs: Math.min(settings.fetch.timeoutMs, timeRemaining),
+      maxRedirects: settings.fetch.maxRedirects,
+      headers: buildHeaders(settings.fetch.userAgent),
+      maxBytes: settings.fetch.htmlMaxBytes,
+    });
+  } catch (error) {
+    // 首页可能被反爬拦截；继续尝试常见 feed 直链，而不是直接判失败。
+    if (Date.now() >= deadlineTs) throw error;
+  }
+
+  if (homepage) {
+    const contentType = homepage.response.headers.get('content-type') || '';
+    const body = homepage.text.trim();
+    if (/rss|atom|xml/i.test(contentType) || /^<\?xml\b|<rss\b|<feed\b/i.test(body)) {
+      return homepage.url;
+    }
+    if (
+      /text\/html/i.test(contentType) ||
+      /application\/xhtml\+xml/i.test(contentType) ||
+      !contentType
+    ) {
+      const candidates = extractFeedLinksFromHtml(homepage.text, homepage.url);
+      for (const candidate of candidates) {
+        const feed = await tryFeedCandidate(candidate, settings, deadlineTs);
+        if (feed) return feed;
+      }
+    }
+  }
+
+  for (const candidate of buildCommonFeedUrls(siteUrl)) {
+    const feed = await tryFeedCandidate(candidate, settings, deadlineTs);
+    if (feed) return feed;
+  }
+
+  return null;
+}
+
+function stripHtmlToText(input: unknown): string {
+  return htmlToText(input);
+}
+
+function truncateText(text: unknown, maxLen: number): string {
+  if (!maxLen || maxLen <= 0) return '';
+  const s = String(text || '');
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + '...';
+}
+
+function normalizePublishedAt(item: FeedItem): string {
+  const iso = item && typeof item.isoDate === 'string' ? item.isoDate : '';
+  if (iso) return iso;
+
+  const pub = item && typeof item.pubDate === 'string' ? item.pubDate : '';
+  if (pub) {
+    const d = new Date(pub);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+
+  return '';
+}
+
+function normalizeArticle(
+  item: FeedItem,
+  sourceSite: SiteLike,
+  settings: RssSettings
+): Article | null {
+  const title = item && item.title !== undefined ? String(item.title).trim() : '';
+  if (!title) return null;
+
+  const link = item && item.link ? String(item.link).trim() : '';
+  if (!isHttpUrl(link)) return null;
+
+  const summaryRaw =
+    (item && item.contentSnippet) || (item && item.summary) || (item && item.content) || '';
+  const summaryText = stripHtmlToText(summaryRaw);
+  const summary = settings.articles.summaryMaxLength
+    ? truncateText(summaryText, settings.articles.summaryMaxLength)
+    : summaryText;
+
+  const publishedAt = normalizePublishedAt(item);
+
+  const source = sourceSite && sourceSite.name ? String(sourceSite.name) : '';
+  const sourceUrl = sourceSite && sourceSite.url ? String(sourceSite.url) : '';
+  const icon = sourceSite && sourceSite.icon ? String(sourceSite.icon) : 'fas fa-pen';
+
+  return {
+    title,
+    url: link,
+    summary,
+    publishedAt,
+    source,
+    // 站点首页 URL（用于生成端按分类聚合展示；文章 url 为具体文章链接）
+    sourceUrl,
+    icon,
+  };
+}
+
+async function fetchAndParseFeed(
+  feedUrl: string,
+  settings: RssSettings,
+  parser: RssParserLike,
+  deadlineTs: number
+): Promise<FeedParseResult> {
+  const timeRemaining = deadlineTs - Date.now();
+  if (timeRemaining <= 0) throw new Error('总超时：无法继续抓取 Feed');
+
+  const feed = await fetchWithRedirects(feedUrl, {
+    timeoutMs: Math.min(settings.fetch.timeoutMs, timeRemaining),
+    maxRedirects: settings.fetch.maxRedirects,
+    headers: {
+      ...buildHeaders(settings.fetch.userAgent),
+      accept: 'application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8',
+    },
+    maxBytes: settings.fetch.feedMaxBytes,
+  });
+
+  const parsed = await parser.parseString(feed.text);
+  return {
+    feedUrl: feed.url,
+    feedTitle: parsed.title || '',
+    items: Array.isArray(parsed.items) ? parsed.items : [],
+  };
+}
+
+async function processSourceSite(
+  sourceSite: SiteLike,
+  settings: RssSettings,
+  parser: RssParserLike,
+  deadlineTs: number
+): Promise<SourceSiteResult> {
+  const url = sourceSite && sourceSite.url ? String(sourceSite.url) : '';
+  if (!isHttpUrl(url)) {
+    return {
+      site: {
+        name: sourceSite && sourceSite.name ? String(sourceSite.name) : '',
+        url,
+        feedUrl: '',
+        status: 'skipped',
+        error: '无效 URL（需为 http/https）',
+        fetchedAt: new Date().toISOString(),
+      },
+      articles: [],
+    };
+  }
+
+  let lastError: unknown = null;
+
+  const tryOnce = async (feedUrl: string): Promise<{ feedUrl: string; articles: Article[] }> => {
+    const parsed = await fetchAndParseFeed(feedUrl, settings, parser, deadlineTs);
+    const normalized = parsed.items
+      .map((item) => normalizeArticle(item, sourceSite, settings))
+      .filter((item): item is Article => Boolean(item))
+      .slice(0, settings.articles.perSite);
+    return { feedUrl: parsed.feedUrl, articles: normalized };
+  };
+
+  const attempt = async () => {
+    const discovered = await discoverFeedUrl(url, settings, deadlineTs);
+    const candidates = discovered
+      ? [discovered, ...buildCommonFeedUrls(url)]
+      : buildCommonFeedUrls(url);
+
+    for (const candidate of [...new Set(candidates)]) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await tryOnce(candidate);
+        return res;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError || new Error('未找到可用 Feed');
+  };
+
+  const elapsedMs = startTimer();
+  for (let i = 0; i <= settings.fetch.maxRetries; i += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await attempt();
+      return {
+        site: {
+          name: sourceSite && sourceSite.name ? String(sourceSite.name) : '',
+          url,
+          feedUrl: res.feedUrl,
+          status: 'success',
+          error: '',
+          fetchedAt: new Date().toISOString(),
+          durationMs: elapsedMs(),
+        },
+        articles: res.articles,
+      };
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  return {
+    site: {
+      name: sourceSite && sourceSite.name ? String(sourceSite.name) : '',
+      url,
+      feedUrl: '',
+      status: 'failed',
+      error: lastError ? getErrorMessage(lastError) : '未知错误',
+      fetchedAt: new Date().toISOString(),
+      durationMs: elapsedMs(),
+    },
+    articles: [],
+  };
+}
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: TItem[],
+  concurrency: number,
+  worker: (item: TItem, index: number) => Promise<TResult>
+): Promise<Array<TResult | { error: unknown }>> {
+  const results = new Array<TResult | { error: unknown }>(items.length);
+  let nextIndex = 0;
+
+  async function runOne() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        results[currentIndex] = await worker(items[currentIndex], currentIndex);
+      } catch (e) {
+        results[currentIndex] = { error: e };
+      }
+    }
+  }
+
+  const runners = [];
+  const count = Math.max(1, Math.min(concurrency, items.length));
+  for (let i = 0; i < count; i += 1) {
+    runners.push(runOne());
+  }
+  await Promise.all(runners);
+  return results;
+}
+
+function buildFlatSitesFromCategories(categories: unknown): SiteLike[] {
+  const out: SiteLike[] = [];
+  if (!Array.isArray(categories)) return out;
+  categories.forEach((category) => collectSitesRecursively(category, out));
+  return out;
+}
+
+function normalizeArticleForCache(article: unknown): Article | null {
+  if (!article || typeof article !== 'object') return null;
+  const record = article as Record<string, unknown>;
+  const title = record.title ? String(record.title) : '';
+  const url = record.url ? String(record.url) : '';
+  if (!title || !url) return null;
+
+  return {
+    title,
+    url,
+    summary: record.summary ? String(record.summary) : '',
+    publishedAt: record.publishedAt ? String(record.publishedAt) : '',
+    source: record.source ? String(record.source) : '',
+    sourceUrl: record.sourceUrl ? String(record.sourceUrl) : '',
+    icon: record.icon ? String(record.icon) : 'fas fa-pen',
+  };
+}
+
+function loadPreviousArticles(cachePath: string): Article[] {
+  try {
+    if (!fs.existsSync(cachePath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as FeedCachePayload | null;
+    const raw = Array.isArray(parsed?.articles) ? parsed.articles : [];
+    return raw
+      .map(normalizeArticleForCache)
+      .filter((article): article is Article => Boolean(article));
+  } catch {
+    return [];
+  }
+}
+
+function mergeArticlesWithPrevious(
+  currentArticles: Article[],
+  currentSourceUrls: string[],
+  successfulSourceUrls: string[],
+  previousArticles: Article[]
+): Article[] {
+  const currentKeys = new Set(currentSourceUrls.map((url) => normalizeUrlKey(url)).filter(Boolean));
+  const successKeys = new Set(
+    successfulSourceUrls.map((url) => normalizeUrlKey(url)).filter(Boolean)
+  );
+  const seen = new Set<string>();
+  const merged: Article[] = [];
+
+  for (const article of currentArticles) {
+    if (!article?.url || seen.has(article.url)) continue;
+    const key = normalizeUrlKey(article.sourceUrl);
+    if (!key || !successKeys.has(key)) continue;
+    seen.add(article.url);
+    merged.push(article);
+  }
+
+  // 失败来源沿用上次成功数据；已从配置删除的来源不再回退。
+  for (const article of previousArticles) {
+    if (!article?.url || seen.has(article.url)) continue;
+    const key = normalizeUrlKey(article.sourceUrl);
+    if (!key || !currentKeys.has(key) || successKeys.has(key)) continue;
+    seen.add(article.url);
+    merged.push(article);
+  }
+
+  merged.sort((a, b) => {
+    const ta = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+    const tb = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+    return tb - ta;
+  });
+  return merged;
+}
+
+async function syncArticlesForPage(
+  pageId: string,
+  pageConfig: PageConfigLike,
+  _config: ConfigLike,
+  settings: RssSettings
+): Promise<{
+  cachePath: string;
+  cache: { stats: { totalArticles: number; totalSites: number } };
+  written: boolean;
+  sources: SyncSourceReport[];
+}> {
+  const sourceSites: SiteLike[] = Array.isArray(pageConfig.sites)
+    ? pageConfig.sites
+    : buildFlatSitesFromCategories(
+        Array.isArray(pageConfig.categories) ? pageConfig.categories : []
+      );
+
+  const elapsedMs = startTimer();
+  const startedAt = Date.now();
+  const deadlineTs = startedAt + settings.fetch.totalTimeoutMs;
+
+  const parser = new Parser({
+    timeout: settings.fetch.timeoutMs,
+  });
+
+  const cacheDir = path.resolve(process.cwd(), settings.cacheDir);
+  const cachePath = path.join(cacheDir, `${pageId}.feed-cache.json`);
+  const previousArticles = loadPreviousArticles(cachePath);
+
+  const results = await mapWithConcurrency(sourceSites, settings.fetch.concurrency, async (site) =>
+    processSourceSite(site, settings, parser, deadlineTs)
+  );
+
+  const sites: SourceSiteResult['site'][] = [];
+  const currentArticles: Article[] = [];
+
+  results.forEach((r, index) => {
+    if (!r || (typeof r === 'object' && 'error' in r)) {
+      const site = sourceSites[index];
+      sites.push({
+        name: site && site.name ? String(site.name) : '',
+        url: site && site.url ? String(site.url) : '',
+        feedUrl: '',
+        status: 'failed',
+        error: getErrorMessage((r as { error: unknown } | undefined)?.error),
+        fetchedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const result = r as SourceSiteResult;
+    if (result.site) sites.push(result.site);
+    if (Array.isArray(result.articles)) currentArticles.push(...result.articles);
+  });
+
+  const successSites = sites.filter((s) => s.status === 'success').length;
+  const failedSites = sites.filter((s) => s.status === 'failed').length;
+  const skippedSites = sites.filter((s) => s.status === 'skipped').length;
+
+  const successfulSourceUrls = sites
+    .filter((site) => site.status === 'success')
+    .map((site) => site.url);
+  const mergedArticles = mergeArticlesWithPrevious(
+    currentArticles,
+    sourceSites.map((site) => (site && site.url ? String(site.url) : '')),
+    successfulSourceUrls,
+    previousArticles
+  );
+  const limitedArticles = mergedArticles.slice(0, settings.articles.total);
+
+  const cache = {
+    version: '1.0',
+    pageId,
+    generatedAt: new Date().toISOString(),
+    title: pageConfig && pageConfig.title ? String(pageConfig.title) : '',
+    sites,
+    articles: limitedArticles,
+    stats: {
+      totalSites: sourceSites.length,
+      successSites,
+      failedSites,
+      skippedSites,
+      totalArticles: limitedArticles.length,
+      durationMs: elapsedMs(),
+    },
+  };
+
+  const written = writeSourceCacheIfUsable(cachePath, cache, sourceSites.length, successSites);
+  if (!written) {
+    log.warn('全部来源失败，保留上一次成功缓存', {
+      page: pageId,
+      cache: cachePath,
+      failed: failedSites,
+      skipped: skippedSites,
+    });
+  }
+
+  const previousKeys = new Set(
+    previousArticles.map((article) => normalizeUrlKey(article.sourceUrl)).filter(Boolean)
+  );
+  const sources: SyncSourceReport[] = sites.map((site) => {
+    const key = normalizeUrlKey(site.url);
+    return {
+      name: site.name || site.url,
+      url: site.url || undefined,
+      status: site.status,
+      ...(site.error ? { error: site.error } : {}),
+      ...(site.status !== 'success' && key && previousKeys.has(key) ? { fallback: true } : {}),
+    };
+  });
+
+  return { cachePath, cache, written, sources };
+}
+
+function pickArticlesPages(config: ConfigLike, onlyPageId: string | null): PageSelection[] {
+  const pages: PageSelection[] = [];
+  const nav = Array.isArray(config.navigation) ? config.navigation : [];
+
+  for (const item of nav) {
+    const pageId = item && item.id ? String(item.id) : '';
+    if (!pageId) continue;
+    if (onlyPageId && pageId !== onlyPageId) continue;
+
+    const pageConfig = config.pages ? config.pages[pageId] : config[pageId];
+    if (!pageConfig || typeof pageConfig !== 'object') continue;
+    const pageRecord = pageConfig as PageConfigLike;
+
+    const templateName = pageRecord.template ? String(pageRecord.template) : pageId;
+    if (templateName !== 'articles') continue;
+
+    pages.push({ pageId, pageConfig: pageRecord });
+  }
+
+  return pages;
+}
+
+async function main() {
+  const elapsedMs = startTimer();
+  const args = process.argv.slice(2);
+  const pageArgIndex = args.findIndex((a) => a === '--page');
+  const onlyPageId = pageArgIndex >= 0 ? args[pageArgIndex + 1] : null;
+
+  log.info('开始', { page: onlyPageId || '' });
+
+  const config = loadConfig() as ConfigLike;
+  const settings = getRssSettings(config);
+
+  if (!settings.enabled) {
+    log.ok('RSS 已禁用，跳过', { env: 'RSS_ENABLED=false' });
+    return;
+  }
+
+  const pages = pickArticlesPages(config, onlyPageId);
+  if (pages.length === 0) {
+    log.ok('未找到需要同步的 articles 页面，跳过');
+    return;
+  }
+
+  log.info('准备同步 articles 页面缓存', { pages: pages.length });
+
+  let success = 0;
+  let failed = 0;
+  let cacheWritten = false;
+  const reportSources: SyncSourceReport[] = [];
+
+  for (const { pageId, pageConfig } of pages) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const { cachePath, cache, written, sources } = await syncArticlesForPage(
+        pageId,
+        pageConfig,
+        config,
+        settings
+      );
+      success += 1;
+      cacheWritten = cacheWritten || written;
+      reportSources.push(...sources);
+      log.ok(written ? '已生成缓存' : '来源全部失败，保留旧缓存', {
+        page: pageId,
+        cache: cachePath,
+        articles: cache && cache.stats ? cache.stats.totalArticles : '',
+        sites: cache && cache.stats ? cache.stats.totalSites : '',
+      });
+    } catch (e) {
+      failed += 1;
+      reportSources.push({
+        name: pageId,
+        status: 'failed',
+        error: getErrorMessage(e),
+      });
+      log.warn('页面同步失败，已跳过（best-effort）', {
+        page: pageId,
+        message: getErrorMessage(e),
+      });
+      const stack = getErrorStack(e);
+      if (isVerbose() && stack) console.error(stack);
+      // best-effort：不阻断其他页面/后续 build
+    }
+  }
+
+  appendSyncReport({
+    script: 'articles',
+    success: reportSources.filter((source) => source.status === 'success').length,
+    failed: reportSources.filter((source) => source.status === 'failed').length,
+    skipped: reportSources.filter((source) => source.status === 'skipped').length,
+    cacheWritten,
+    sources: reportSources,
+  });
+
+  log.ok('完成', { ms: elapsedMs(), pages: pages.length, success, failed });
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    appendSyncReport({
+      script: 'articles',
+      success: 0,
+      failed: 1,
+      skipped: 0,
+      cacheWritten: false,
+      sources: [{ name: 'articles', status: 'failed', error: getErrorMessage(err) }],
+    });
+    log.error('执行失败（best-effort，不阻断后续 build/deploy）', {
+      message: getErrorMessage(err),
+    });
+    const stack = getErrorStack(err);
+    if (isVerbose() && stack) console.error(stack);
+    // best-effort：不阻断后续 build/deploy（错误已输出到日志，便于排查）
+    process.exitCode = 0;
+  });
+}
+
+module.exports = {
+  getRssSettings,
+  isPrivateIp,
+  assertSafeToFetch,
+  fetchWithRedirects,
+  extractFeedLinksFromHtml,
+  buildCommonFeedUrls,
+  discoverFeedUrl,
+  stripHtmlToText,
+  normalizeArticle,
+  buildFlatSitesFromCategories,
+  mergeArticlesWithPrevious,
+  shouldWriteSourceCache,
+  writeSourceCacheIfUsable,
+};

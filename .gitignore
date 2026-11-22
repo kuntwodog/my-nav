@@ -1,0 +1,69 @@
+# 依赖相关
+node_modules/
+npm-debug.log*
+
+# 构建输出
+dist/
+dist-node/
+/.wrangler/
+.astro/
+.tsbuildinfo/
+public/assets/
+public/pinyin-match.js
+public/script.js
+public/menav-config.json
+public/search-index.json
+public/menav.svg
+public/favicon.ico
+public/.menav-snapshot-assets.json
+
+# IDE/编辑器配置
+.vscode/
+.idea/
+.specstory
+.cursorindexingignore
+.cursor
+.spec-workflow/
+.serena/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+
+# 个人笔记（docs/ 为随仓库提交的文档中心）
+docs/local/
+docs/*.local.md
+
+# 本地文档与设计上下文
+docs-myself/
+.impeccable.md
+
+# 本地任务记录
+/task_plan.md
+/findings.md
+/progress.md
+
+# 测试相关文件
+dev/
+jest.config.js
+tests/
+coverage/
+.nyc_output/
+jest-*.json
+jest.results.json
+.eslintcache
+tests/screenshots/
+tests/fixtures/
+*.test.js
+*.spec.js
+
+# SpecStory explanation file
+.specstory/.what-is-this.md
+AGENTS.md
+/.claude
+/discord-style-navstation
+REVIEW.md
+
+# Playwright MCP 运行产物
+/.playwright-mcp/

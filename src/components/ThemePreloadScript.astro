@@ -1,0 +1,50 @@
+<script is:inline>
+  (function () {
+    var savedTheme = null;
+    try {
+      savedTheme = localStorage.getItem('theme');
+    } catch (e) {
+      // 存储被禁用时按站点默认主题渲染。
+    }
+    var defaultThemeMode = document.documentElement.getAttribute('data-theme-mode') || 'dark';
+    defaultThemeMode = String(defaultThemeMode).trim().toLowerCase();
+    var shouldUseLight = false;
+
+    if (savedTheme === 'light') {
+      shouldUseLight = true;
+    } else if (savedTheme === 'dark') {
+      shouldUseLight = false;
+    } else if (defaultThemeMode === 'light') {
+      shouldUseLight = true;
+    } else if (defaultThemeMode === 'system') {
+      try {
+        shouldUseLight =
+          window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      } catch (e) {
+        shouldUseLight = false;
+      }
+    }
+
+    var themeColorMeta = document.getElementById('menav-theme-color');
+    if (themeColorMeta) {
+      themeColorMeta.setAttribute('content', shouldUseLight ? '#e0e0d8' : '#0d0c0b');
+    }
+
+    if (shouldUseLight) {
+      document.documentElement.classList.add('theme-preload');
+    }
+
+    var sidebarCollapsed = false;
+    try {
+      sidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
+    } catch (e) {
+      // 无法读取时按展开态首帧渲染。
+    }
+    var isMobile = window.innerWidth <= 768;
+    if (sidebarCollapsed && !isMobile) {
+      document.documentElement.classList.add('sidebar-collapsed-preload');
+    }
+
+    document.documentElement.classList.add('preload');
+  })();
+</script>

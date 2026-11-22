@@ -1,0 +1,104 @@
+# ============================================================
+# 博客内容管理（Sveltia CMS）
+# 目标仓库：kuntwodog/margin-blog
+# 登录方式：GitHub Token（无需 OAuth 代理）
+# ============================================================
+
+backend:
+  name: github
+  repo: kuntwodog/margin-blog
+  branch: main
+
+site_url: https://blog.htwok.cn
+display_url: https://blog.htwok.cn
+logo_url: https://blog.htwok.cn/img/avatar.webp
+
+locale: zh_Hans
+
+# 图片统一上传到 public/img/uploads，站点内以 /img/uploads/ 访问
+media_folder: public/img/uploads
+public_folder: /img/uploads
+
+publish_mode: simple
+
+collections:
+  - name: posts
+    label: 博客文章
+    label_singular: 文章
+    folder: src/content/blog
+    nested:
+      depth: 4
+    create: true
+    extension: md
+    format: frontmatter
+    slug:
+      editable: true
+    sortable_fields: [date, title]
+    media_folder: public/img/uploads
+    public_folder: /img/uploads
+    fields:
+      - label: 标题
+        name: title
+        widget: string
+        hint: 文章标题。新建文章时点击文件名区域可自定义 URL 路径（slug）
+
+      - label: 描述
+        name: description
+        widget: text
+        required: false
+        hint: 用于列表摘要和 SEO 描述
+
+      - label: 发布日期
+        name: date
+        widget: datetime
+        date_format: 'YYYY-MM-DD'
+        time_format: 'HH:mm'
+
+      - label: 更新日期
+        name: updated
+        widget: datetime
+        date_format: 'YYYY-MM-DD'
+        time_format: 'HH:mm'
+        required: false
+
+      - label: 分类
+        name: categories
+        widget: list
+        required: false
+        default: []
+        hint: 每个分类一行，例如 life、note
+
+      - label: 标签
+        name: tags
+        widget: list
+        required: false
+        default: []
+
+      - label: 封面图
+        name: cover
+        widget: image
+        required: false
+        hint: 不填则不显示封面
+
+      - label: 置顶
+        name: sticky
+        widget: boolean
+        required: false
+        default: false
+
+      - label: 草稿
+        name: draft
+        widget: boolean
+        required: false
+        default: false
+        hint: 勾选后不会出现在站点上
+
+      - label: 目录编号
+        name: tocNumbering
+        widget: boolean
+        required: false
+        default: true
+
+      - label: 正文
+        name: body
+        widget: markdown

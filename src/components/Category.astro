@@ -1,0 +1,99 @@
+---
+import Category from './Category.astro';
+import Group from './Group.astro';
+import SiteCard from './SiteCard.astro';
+import type { CategoryItem } from '../types/page';
+import type { RenderContext } from '../types/render';
+import { DEFAULT_RENDER_CONTEXT } from '../lib/view-data/render-context.ts';
+import { getCategoryChildren } from '../lib/site-data/categories.ts';
+
+interface Props {
+  category?: CategoryItem;
+  level?: number;
+  renderContext?: RenderContext;
+}
+
+const { category = {}, level = 1, renderContext = DEFAULT_RENDER_CONTEXT } = Astro.props;
+const categoryLevel = category.level || level || 1;
+const headingLevel = Math.min(categoryLevel + 1, 6);
+const HeadingTag = `h${headingLevel}`;
+const id = category.slug || category.name;
+const children = getCategoryChildren(category);
+const childRuns: { kind: (typeof children)[number]['kind']; nodes: CategoryItem[] }[] = [];
+for (const { kind, node } of children) {
+  const last = childRuns.at(-1);
+  if (last?.kind === kind) last.nodes.push(node);
+  else childRuns.push({ kind, nodes: [node] });
+}
+const cards = Array.isArray(category.cards) ? category.cards : [];
+const hasChildren = children.length > 0;
+const hasCards = cards.length > 0;
+const isToggleable = category.foldable !== false && (hasChildren || hasCards);
+---
+
+<section
+  class:list={['category', `category-level-${categoryLevel}`]}
+  id={id}
+  data-type="category"
+  data-id={id}
+  data-key={id}
+  data-name={category.name}
+  data-icon={category.icon}
+  data-level={categoryLevel}
+  data-container="categories"
+>
+  <div class="category-header" data-toggle={isToggleable ? 'category' : undefined}>
+    <HeadingTag data-editable="category-name">
+      <i class={category.icon}></i>
+      {category.name}
+      {
+        isToggleable && (
+          <button
+            type="button"
+            class="category-toggle-btn"
+            aria-expanded="true"
+            aria-label={`收起${category.name}`}
+          >
+            <span class="toggle-icon">
+              <i class="fas fa-chevron-down" />
+            </span>
+          </button>
+        )
+      }
+    </HeadingTag>
+  </div>
+
+  <div class="category-content collapse-content">
+    <div class="collapse-content-inner">
+      {
+        childRuns.map(({ kind, nodes }) => (
+          <div class={`${kind}-container`} data-container={kind}>
+            {nodes.map((node) =>
+              kind === 'subcategories' ? (
+                <Category category={node} level={categoryLevel + 1} renderContext={renderContext} />
+              ) : (
+                <Group
+                  group={node}
+                  level={kind === 'subgroups' ? 4 : 3}
+                  renderContext={renderContext}
+                />
+              )
+            )}
+          </div>
+        ))
+      }
+
+      {
+        hasCards && (
+          <div class="sites-grid" data-container="sites">
+            {cards.map((card) => (
+              <SiteCard card={card} renderContext={renderContext} />
+            ))}
+          </div>
+        )
+      }
+
+      {!hasChildren && !hasCards && <p class="empty-content">暂无内容</p>}
+    </div>
+  </div>
+</section>

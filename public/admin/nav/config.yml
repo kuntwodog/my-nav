@@ -1,0 +1,227 @@
+# ============================================================
+# 导航页内容管理（Sveltia CMS）
+# 目标仓库：kuntwodog/my-nav
+# 登录方式：GitHub Token（与博客后台共用同一个 Token）
+# ============================================================
+
+backend:
+  name: github
+  repo: kuntwodog/my-nav
+  branch: main
+
+site_url: https://htwok.cn
+display_url: https://htwok.cn
+logo_url: https://htwok.cn/menav.svg
+
+locale: zh_Hans
+
+media_folder: public/uploads
+public_folder: /uploads
+
+publish_mode: simple
+
+collections:
+  # ---------- 站点级设置 ----------
+  - name: settings
+    label: 站点设置
+    files:
+      - label: 站点信息 / 菜单 / 社交
+        name: site
+        file: config/user/site.yml
+        fields:
+          - { label: 站点标题, name: title, widget: string }
+          - { label: 站点描述, name: description, widget: string }
+          - { label: 作者, name: author, widget: string }
+          - { label: 站点图标, name: favicon, widget: string, hint: 'public 目录下的文件名，例如 menav.svg' }
+          - { label: Logo 文字, name: logo_text, widget: string }
+
+          - label: 站点图标设置
+            name: icons
+            widget: object
+            fields:
+              - { label: 图标模式, name: mode, widget: select, options: [favicon, manual], hint: 'favicon：自动抓取站点图标；manual：只用下方手动图标' }
+              - { label: 图标服务区域, name: region, widget: select, options: [com, cn], hint: '国内访问建议 cn' }
+
+          - label: 链接安全策略
+            name: security
+            widget: object
+            fields:
+              - { label: 允许的协议, name: allowedSchemes, widget: list, default: [http, https, mailto, tel] }
+
+          - label: 主题
+            name: theme
+            widget: object
+            fields:
+              - { label: 默认明暗模式, name: mode, widget: select, options: [dark, light, system] }
+
+          - label: 字体
+            name: fonts
+            widget: object
+            fields:
+              - { label: 字体来源, name: source, widget: select, options: [css, google, system] }
+              - { label: 字体 CSS 地址, name: cssUrl, widget: string, required: false }
+              - { label: 预加载, name: preload, widget: boolean, required: false }
+              - { label: 字体族, name: family, widget: string, required: false }
+              - { label: 字重, name: weight, widget: string, required: false }
+
+          - label: 首页欢迎语
+            name: profile
+            widget: object
+            fields:
+              - { label: 标题, name: title, widget: string }
+              - { label: 副标题, name: subtitle, widget: string }
+
+          - label: RSS 聚合
+            name: rss
+            widget: object
+            collapsed: true
+            fields:
+              - { label: 启用, name: enabled, widget: boolean }
+              - { label: 缓存目录, name: cacheDir, widget: string }
+              - label: 抓取设置
+                name: fetch
+                widget: object
+                fields:
+                  - { label: 单请求超时(毫秒), name: timeoutMs, widget: number, value_type: int }
+                  - { label: 总超时(毫秒), name: totalTimeoutMs, widget: number, value_type: int }
+                  - { label: 并发数, name: concurrency, widget: number, value_type: int }
+                  - { label: 重试次数, name: maxRetries, widget: number, value_type: int }
+                  - { label: 最大重定向, name: maxRedirects, widget: number, value_type: int }
+              - label: 文章聚合
+                name: articles
+                widget: object
+                fields:
+                  - { label: 单站条数, name: perSite, widget: number, value_type: int }
+                  - { label: 总数上限, name: total, widget: number, value_type: int }
+                  - { label: 摘要长度, name: summaryMaxLength, widget: number, value_type: int }
+
+          - label: GitHub
+            name: github
+            widget: object
+            collapsed: true
+            fields:
+              - { label: 用户名, name: username, widget: string, hint: '用于项目页贡献热力图，留空则不显示' }
+              - { label: 热力图颜色, name: heatmapColor, widget: string, hint: '不带 #，例如 37b24d' }
+              - { label: 缓存目录, name: cacheDir, widget: string }
+
+          - label: 社交链接
+            name: social
+            widget: list
+            fields:
+              - { label: 名称, name: name, widget: string }
+              - { label: 链接, name: url, widget: string }
+              - { label: 图标类, name: icon, widget: string, hint: 'Font Awesome 类名，例如 fab fa-github' }
+
+          - label: 导航菜单
+            name: navigation
+            widget: list
+            hint: 顺序即页面顺序，第一项为首页
+            fields:
+              - { label: 名称, name: name, widget: string }
+              - { label: 图标类, name: icon, widget: string, hint: '例如 fas fa-star' }
+              - { label: 页面 ID, name: id, widget: string, hint: '需与 config/user/pages/<id>.yml 对应' }
+
+  # ---------- 页面内容 ----------
+  - name: pages
+    label: 页面内容
+    files:
+      - label: 常用网站
+        name: common
+        file: config/user/pages/common.yml
+        fields:
+          - { label: 页面标题, name: title, widget: string }
+          - { label: 副标题, name: subtitle, widget: string }
+          - { label: 页面类型, name: template, widget: select, options: [page, articles, projects, bookmarks, content] }
+          - label: 分类与站点
+            name: categories
+            widget: list
+            fields:
+              - { label: 分类名称, name: name, widget: string }
+              - { label: 分类图标, name: icon, widget: string, required: false, hint: '例如 fas fa-star' }
+              - label: 站点
+                name: sites
+                widget: list
+                fields:
+                  - { label: 名称, name: name, widget: string }
+                  - { label: 链接, name: url, widget: string }
+                  - { label: 图标类, name: icon, widget: string, required: false, hint: '例如 fab fa-github' }
+                  - { label: 描述, name: description, widget: text, required: false }
+                  - { label: 自定义图标地址, name: faviconUrl, widget: string, required: false, hint: '例如 assets/menav.svg，留空则用图标类' }
+
+      - label: 技术文章
+        name: articles
+        file: config/user/pages/articles.yml
+        fields:
+          - { label: 页面标题, name: title, widget: string }
+          - { label: 副标题, name: subtitle, widget: string }
+          - { label: 页面类型, name: template, widget: select, options: [page, articles, projects, bookmarks, content] }
+          - label: 分类与站点
+            name: categories
+            widget: list
+            fields:
+              - { label: 分类名称, name: name, widget: string }
+              - { label: 分类图标, name: icon, widget: string, required: false, hint: '例如 fas fa-star' }
+              - label: 站点
+                name: sites
+                widget: list
+                fields:
+                  - { label: 名称, name: name, widget: string }
+                  - { label: 链接, name: url, widget: string }
+                  - { label: 图标类, name: icon, widget: string, required: false, hint: '例如 fab fa-github' }
+                  - { label: 描述, name: description, widget: text, required: false }
+                  - { label: 自定义图标地址, name: faviconUrl, widget: string, required: false, hint: '例如 assets/menav.svg，留空则用图标类' }
+
+
+      - label: 项目
+        name: projects
+        file: config/user/pages/projects.yml
+        fields:
+          - { label: 页面标题, name: title, widget: string }
+          - { label: 副标题, name: subtitle, widget: string }
+          - { label: 页面类型, name: template, widget: select, options: [page, articles, projects, bookmarks, content] }
+          - label: 分类与站点
+            name: categories
+            widget: list
+            fields:
+              - { label: 分类名称, name: name, widget: string }
+              - { label: 分类图标, name: icon, widget: string, required: false, hint: '例如 fas fa-star' }
+              - label: 站点
+                name: sites
+                widget: list
+                fields:
+                  - { label: 名称, name: name, widget: string }
+                  - { label: 链接, name: url, widget: string }
+                  - { label: 图标类, name: icon, widget: string, required: false, hint: '例如 fab fa-github' }
+                  - { label: 描述, name: description, widget: text, required: false }
+                  - { label: 自定义图标地址, name: faviconUrl, widget: string, required: false, hint: '例如 assets/menav.svg，留空则用图标类' }
+
+
+      - label: 书签
+        name: bookmarks
+        file: config/user/pages/bookmarks.yml
+        fields:
+          - { label: 页面标题, name: title, widget: string }
+          - { label: 副标题, name: subtitle, widget: string }
+          - { label: 页面类型, name: template, widget: select, options: [page, articles, projects, bookmarks, content] }
+          - label: 分类与站点
+            name: categories
+            widget: list
+            fields:
+              - { label: 分类名称, name: name, widget: string }
+              - { label: 分类图标, name: icon, widget: string, required: false, hint: '例如 fas fa-star' }
+              - label: 站点
+                name: sites
+                widget: list
+                fields:
+                  - { label: 名称, name: name, widget: string }
+                  - { label: 链接, name: url, widget: string }
+                  - { label: 图标类, name: icon, widget: string, required: false, hint: '例如 fab fa-github' }
+                  - { label: 描述, name: description, widget: text, required: false }
+                  - { label: 自定义图标地址, name: faviconUrl, widget: string, required: false, hint: '例如 assets/menav.svg，留空则用图标类' }
+
+
+      - label: 关于页正文
+        name: about
+        file: content/about.md
+        fields:
+          - { label: 正文, name: body, widget: markdown }
